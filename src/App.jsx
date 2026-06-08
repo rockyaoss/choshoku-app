@@ -1,4 +1,6 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
+import { db } from "./firebase";
+import { collection, addDoc, getDocs, query, orderBy, Timestamp } from "firebase/firestore";
 
 // ── Initial Data ──────────────────────────────────────────────
 const INITIAL_INVENTORY = [
@@ -539,7 +541,9 @@ function EditPage({ inventory, setInventory, canEdit }) {
     return inventory.filter(i => i.name.toLowerCase().includes(q) || i.code.toLowerCase().includes(q));
   }, [inventory, search]);
 
-  const apply = () => {
+  const [saving, setSaving] = useState(false);
+
+  const apply = async () => {
     if (!selected || !amount || isNaN(parseFloat(amount))) return;
     const g = parseFloat(amount);
     setInventory(prev => prev.map(i => {
@@ -549,6 +553,21 @@ function EditPage({ inventory, setInventory, canEdit }) {
     }));
     const entry = { time: new Date().toLocaleTimeString("ja-JP"), mode, code: selected.code, name: selected.name, amount: g };
     setLog(prev => [entry, ...prev].slice(0, 20));
+
+    if (mode === "使用") {
+      setSaving(true);
+      try {
+        await addDoc(collection(db, "usageLogs"), {
+          code: selected.code,
+          name: selected.name,
+          category: selected.category,
+          amount: g,
+          date: today,
+          timestamp: Timestamp.now(),
+        });
+      } catch (e) { console.error("保存エラー:", e); }
+      setSaving(false);
+    }
     setAmount("");
     setSelected(null);
   };
@@ -591,10 +610,10 @@ function EditPage({ inventory, setInventory, canEdit }) {
           <div style={{ fontSize: 12, color: "#64748b", marginBottom: 6 }}>{mode}量（g）</div>
           <div style={{ display: "flex", gap: 8 }}>
             <input type="number" value={amount} onChange={e => setAmount(e.target.value)} placeholder="例：500" style={{ ...inputStyle, flex: 1 }} />
-            <button onClick={apply} style={{
+            <button onClick={apply} disabled={saving} style={{
               background: mode === "入荷" ? "linear-gradient(135deg,#22c55e,#16a34a)" : "linear-gradient(135deg,#ef4444,#dc2626)",
-              color: "#fff", border: "none", borderRadius: 8, padding: "0 20px", fontSize: 14, fontWeight: 700, cursor: "pointer"
-            }}>記録</button>
+              color: "#fff", border: "none", borderRadius: 8, padding: "0 20px", fontSize: 14, fontWeight: 700, cursor: "pointer", opacity: saving ? 0.7 : 1
+            }}>{saving ? "保存中..." : "記録"}</button>
           </div>
         </div>
       )}
@@ -638,6 +657,103 @@ function EditPage({ inventory, setInventory, canEdit }) {
   );
 }
 
+// ── Page 4: 使用量集計 ────────────────────────────────────────
+function StatsPage() {
+  const [logs, setLogs] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [period, setPeriod] = useState("month");
+  const [customFrom, setCustomFrom] = useState("");
+  const [customTo, setCustomTo] = useState(today);
+
+  useEffect(() => {
+    const fetchLogs = async () => {
+      setLoading(true);
+      try {
+        const q = query(collection(db, "usageLogs"), orderBy("timestamp", "desc"));
+        const snap = await getDocs(q);
+        setLogs(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      } catch (e) { console.error(e); }
+      setLoading(false);
+    };
+    fetchLogs();
+  }, []);
+
+  const filtered = useMemo(() => {
+    const now = new Date();
+    let from;
+    if (period === "month") from = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
+    else if (period === "3month") from = new Date(now.getFullYear(), now.getMonth() - 2, 1).toISOString().slice(0, 10);
+    else if (period === "year") from = new Date(now.getFullYear(), 0, 1).toISOString().slice(0, 10);
+    else from = customFrom;
+    const to = period === "custom" ? customTo : today;
+    return logs.filter(l => l.date >= (from || "0000") && l.date <= to);
+  }, [logs, period, customFrom, customTo]);
+
+  const ranking = useMemo(() => {
+    const map = {};
+    filtered.forEach(l => {
+      if (!map[l.code]) map[l.code] = { code: l.code, name: l.name, category: l.category, total: 0 };
+      map[l.code].total += l.amount;
+    });
+    return Object.values(map).sort((a, b) => b.total - a.total);
+  }, [filtered]);
+
+  const inputStyle = { background: "#0f172a", border: "1px solid #334155", borderRadius: 8, padding: "8px 12px", color: "#e2e8f0", fontSize: 13, outline: "none", boxSizing: "border-box" };
+
+  return (
+    <div>
+      <div style={{ fontSize: 15, fontWeight: 800, color: "#e2e8f0", marginBottom: 16 }}>📊 使用量集計</div>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 16 }}>
+        {[{ key: "month", label: "今月" }, { key: "3month", label: "3ヶ月" }, { key: "year", label: "今年" }, { key: "custom", label: "期間指定" }].map(p => (
+          <button key={p.key} onClick={() => setPeriod(p.key)} style={{ padding: "6px 14px", borderRadius: 99, border: "1px solid", fontSize: 12, cursor: "pointer", borderColor: period === p.key ? "#38bdf8" : "#334155", background: period === p.key ? "rgba(56,189,248,.2)" : "transparent", color: period === p.key ? "#38bdf8" : "#64748b" }}>{p.label}</button>
+        ))}
+      </div>
+      {period === "custom" && (
+        <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 16 }}>
+          <input type="date" value={customFrom} onChange={e => setCustomFrom(e.target.value)} style={{ ...inputStyle, flex: 1 }} />
+          <span style={{ color: "#64748b" }}>〜</span>
+          <input type="date" value={customTo} onChange={e => setCustomTo(e.target.value)} style={{ ...inputStyle, flex: 1 }} />
+        </div>
+      )}
+      {loading ? (
+        <div style={{ textAlign: "center", padding: 40, color: "#475569" }}>読み込み中...</div>
+      ) : ranking.length === 0 ? (
+        <div style={{ textAlign: "center", padding: 40, color: "#475569" }}>
+          <div style={{ fontSize: 40, marginBottom: 12 }}>📭</div>
+          <div>この期間の使用記録がありません</div>
+          <div style={{ fontSize: 12, marginTop: 8, color: "#334155" }}>在庫編集で「使用」を記録すると集計に反映されます</div>
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <div style={{ fontSize: 12, color: "#64748b", marginBottom: 4 }}>{ranking.length}品目 合計 {fmtG(ranking.reduce((s, r) => s + r.total, 0))}</div>
+          {ranking.map((item, i) => {
+            const maxTotal = ranking[0].total;
+            const pct = Math.round((item.total / maxTotal) * 100);
+            const medal = ["🥇", "🥈", "🥉"][i] || `#${i + 1}`;
+            return (
+              <div key={item.code} style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 10, padding: "12px 14px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ fontSize: i < 3 ? 18 : 13, minWidth: 28, textAlign: "center", color: "#64748b", fontWeight: 700 }}>{medal}</span>
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: "#e2e8f0" }}>{item.name}</div>
+                      <div style={{ fontSize: 11, color: "#475569" }}>{item.code} · {item.category}</div>
+                    </div>
+                  </div>
+                  <div style={{ fontSize: 15, fontWeight: 800, color: "#38bdf8", fontFamily: "'DM Mono', monospace" }}>{fmtG(item.total)}</div>
+                </div>
+                <div style={{ height: 4, background: "#1e293b", borderRadius: 99 }}>
+                  <div style={{ width: pct + "%", height: "100%", background: "linear-gradient(90deg,#38bdf8,#818cf8)", borderRadius: 99 }} />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Main App ──────────────────────────────────────────────────
 export default function App() {
   const [page, setPage] = useState(0);
@@ -659,6 +775,7 @@ export default function App() {
     { label: "在庫一覧", icon: "📦" },
     { label: "製造指示", icon: "🏭" },
     { label: "在庫編集", icon: "✏️" },
+    { label: "集計", icon: "📊" },
   ];
 
   const lowCount = inventory.filter(i => i.minStock > 0 && i.stock < i.minStock).length;
@@ -713,6 +830,7 @@ export default function App() {
         {page === 0 && <InventoryPage inventory={inventory} setInventory={setInventory} canEdit={isAdmin} />}
         {page === 1 && <OrdersPage orders={orders} setOrders={setOrders} canEdit={isAdmin} />}
         {page === 2 && <EditPage inventory={inventory} setInventory={setInventory} canEdit={isAdmin} />}
+        {page === 3 && <StatsPage />}
       </div>
 
       {/* Bottom Nav */}
